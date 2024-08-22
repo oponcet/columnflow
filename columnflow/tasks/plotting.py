@@ -6,6 +6,9 @@ Tasks to plot different types of histograms.
 
 from collections import OrderedDict
 from abc import abstractmethod
+# import matplotlib.pyplot as plt
+
+
 
 import law
 import luigi
@@ -22,7 +25,9 @@ from columnflow.tasks.framework.plotting import (
 from columnflow.tasks.framework.decorators import view_output_plots
 from columnflow.tasks.framework.remote import RemoteWorkflow
 from columnflow.tasks.histograms import MergeHistograms, MergeShiftedHistograms
+from columnflow.tasks.data_driven_methods import DataDrivenEstimation
 from columnflow.util import DotDict, dev_sandbox, dict_add_strict
+from columnflow.plotting.plot_functions_ratio import plot_ratio_FF
 
 
 class PlotVariablesBase(
@@ -39,6 +44,9 @@ class PlotVariablesBase(
     RemoteWorkflow,
 ):
     sandbox = dev_sandbox(law.config.get("analysis", "default_columnar_sandbox"))
+    """sandbox to use for this task. Defaults to *default_columnar_sandbox* from
+    analysis config.
+    """
 
     exclude_index = True
 
@@ -46,7 +54,10 @@ class PlotVariablesBase(
     reqs = Requirements(
         RemoteWorkflow.reqs,
         MergeHistograms=MergeHistograms,
+        
     )
+    """Set upstream requirements, in this case :py:class:`~columnflow.tasks.histograms.MergeHistograms`
+    """
 
     def store_parts(self):
         parts = super().store_parts()
@@ -62,7 +73,6 @@ class PlotVariablesBase(
 
     def workflow_requires(self):
         reqs = super().workflow_requires()
-
         reqs["merged_hists"] = self.requires_from_branch()
 
         return reqs
@@ -75,120 +85,187 @@ class PlotVariablesBase(
     @view_output_plots
     def run(self):
         import hist
+        from cmsdb.processes.qcd import qcd
+        from cmsdb.processes.data import data
 
         # get the shifts to extract and plot
         plot_shifts = law.util.make_list(self.get_plot_shifts())
-
-        # copy process instances once so that their auxiliary data fields can be used as a storage
-        # for process-specific plot parameters later on in plot scripts without affecting the
-        # original instances
-        fake_root = od.Process(
-            name=f"{hex(id(object()))[2:]}",
-            id="+",
-            processes=list(map(self.config_inst.get_process, self.processes)),
-        ).copy()
-        process_insts = list(fake_root.processes)
-        fake_root.processes.clear()
-
-        # prepare other config objects
-        variable_tuple = self.variable_tuples[self.branch_data.variable]
+        hists_iso = {} # iso 
+        hists_antiiso = {} # anti iso
+        # prepare config objects
+        # variable_tuple = self.variable_tuples[self.branch_data.variable]
+        variable_tuple = self.variables
+        print("variable_tuple", variable_tuple)
         variable_insts = [
             self.config_inst.get_variable(var_name)
             for var_name in variable_tuple
         ]
-        category_inst = self.config_inst.get_category(self.branch_data.category)
-        leaf_category_insts = category_inst.get_leaf_categories() or [category_inst]
-        sub_process_insts = {
-            process_inst: [sub for sub, _, _ in process_inst.walk_processes(include_self=True)]
-            for process_inst in process_insts
-        }
+        print("variable_insts", variable_insts)
+        for var in variable_insts:
+            print("variable", var)
+            # from IPython import embed; embed()
+           
+            categories = self.categories
+            nb_cat = len(categories)
+            for cat in categories:
+                category_inst =self.config_inst.get_category(cat)
+                print(self.config_inst.get_category(cat))
+                # category_inst = self.config_inst.get_category(self.branch_data.category)
+                leaf_category_insts = category_inst.get_leaf_categories() or [category_inst]
+                print(leaf_category_insts)
+                process_insts = list(map(self.config_inst.get_process, self.processes))
+                print(process_insts)
+                sub_process_insts = {
+                    proc: [sub for sub, _, _ in proc.walk_processes(include_self=True)]
+                    for proc in process_insts
+                }
+                # histogram data per process
+                hists = {}
+                with self.publish_step(f"plotting {var} in {category_inst.name}"):
+                    qcd_hist_inp = self.input()['qcd_hists']
+                    #from IPython import embed; embed()
+                    # qcd_hist = qcd_hist_inp["collection"][0]['qcd_hists'].targets[self.branch_data.variable].load(formatter="pickle")
+                    qcd_hist = qcd_hist_inp["collection"][0]['qcd_hists'].targets[var.name].load(formatter="pickle")
 
-        # histogram data per process copy
-        hists = {}
+                    for dataset, inp in self.input().items():
+                        if dataset != 'qcd_hists':
+                            dataset_inst = self.config_inst.get_dataset(dataset)
+                            # h_in = inp["collection"][0]["hists"].targets[self.branch_data.variable].load(formatter="pickle")
+                            h_in = inp["collection"][0]["hists"].targets[var.name].load(formatter="pickle")
 
-        with self.publish_step(f"plotting {self.branch_data.variable} in {category_inst.name}"):
-            for dataset, inp in self.input().items():
-                dataset_inst = self.config_inst.get_dataset(dataset)
-                h_in = inp["collection"][0]["hists"].targets[self.branch_data.variable].load(formatter="pickle")
+                            # loop and extract one histogram per process
+                            for process_inst in process_insts:
+                                # skip when the dataset is already known to not contain any sub process
+                                if not any(map(dataset_inst.has_process, sub_process_insts[process_inst])):
+                                    continue
 
-                # loop and extract one histogram per process
-                for process_inst in process_insts:
-                    # skip when the dataset is already known to not contain any sub process
-                    if not any(
-                        dataset_inst.has_process(sub_process_inst.name)
-                        for sub_process_inst in sub_process_insts[process_inst]
-                    ):
-                        continue
+                                # work on a copy
+                                h = h_in.copy()
 
-                    # select processes and reduce axis
-                    h = h_in.copy()
-                    h = h[{
-                        "process": [
-                            hist.loc(p.id)
-                            for p in sub_process_insts[process_inst]
-                            if p.id in h.axes["process"]
-                        ],
-                    }]
-                    h = h[{"process": sum}]
+                                # axis selections
+                                h = h[{
+                                    "process": [
+                                        hist.loc(p.id)
+                                        for p in sub_process_insts[process_inst]
+                                        if p.id in h.axes["process"]
+                                    ],
+                                    "category": [
+                                        hist.loc(c.id)
+                                        for c in leaf_category_insts
+                                        if c.id in h.axes["category"]
+                                    ],
+                                    "shift": [
+                                        hist.loc(s.id)
+                                        for s in plot_shifts
+                                        if s.id in h.axes["shift"]
+                                    ],
+                                }]
 
-                    # add the histogram
-                    if process_inst in hists:
-                        hists[process_inst] += h
-                    else:
-                        hists[process_inst] = h
+                                # axis reductions
+                                h = h[{"process": sum, "category": sum}]
 
-            # there should be hists to plot
-            if not hists:
-                raise Exception(
-                    "no histograms found to plot; possible reasons:\n"
-                    "  - requested variable requires columns that were missing during histogramming\n"
-                    "  - selected --processes did not match any value on the process axis of the input histogram",
-                )
+                                # add the histogram
+                                if process_inst in hists:
+                                    hists[process_inst] += h
+                                else:
+                                    hists[process_inst] = h
+                    # there should be hists to plot
+                    if not hists:
+                        raise Exception(
+                            "no histograms found to plot; possible reasons:\n" +
+                            "  - requested variable requires columns that were missing during histogramming\n" +
+                            "  - selected --processes did not match any value on the process axis of the input histogram",
+                        )
+                    # sort hists by process order
+                    hists = OrderedDict(
+                        (process_inst.copy_shallow(), hists[process_inst])
+                        for process_inst in sorted(hists, key=process_insts.index)
+                    )
+                    # from IPython import embed; embed()
+                    hists[qcd] = qcd_hist
 
-            # update histograms using custom hooks
-            hists = self.invoke_hist_hooks(hists)
+                    print(">>>>>> category_inst", category_inst.name, "and variable", var.name)
 
-            # add new processes to the end of the list
-            for process_inst in hists:
-                if process_inst not in process_insts:
-                    process_insts.append(process_inst)
+                    if nb_cat ==2 : 
+                        if "FFDRIso" in category_inst.name and var.name == "tau_1_pt":
+                            print("fill numerator for variable", var.name)
+                            hists_iso = hists[qcd]
+                            print("hists_iso", hists_iso)
+                        elif "FFDRantiIso" in category_inst.name and var.name == "tauantiiso_1_pt":
+                            print("fill denominator for variable", var.name)
+                            hists_antiiso = hists[qcd]
+                            print("hists_antiiso", hists_antiiso)
+                        else:
+                            print("Not accounted in ratio plot")
 
-            # axis selections and reductions, including sorting by process order
-            _hists = OrderedDict()
-            for process_inst in sorted(hists, key=process_insts.index):
-                h = hists[process_inst]
-                # selections
-                h = h[{
-                    "category": [
-                        hist.loc(c.id)
-                        for c in leaf_category_insts
-                        if c.id in h.axes["category"]
-                    ],
-                    "shift": [
-                        hist.loc(s.id)
-                        for s in plot_shifts
-                        if s.id in h.axes["shift"]
-                    ],
-                }]
-                # reductions
-                h = h[{"category": sum}]
-                # store
-                _hists[process_inst] = h
-            hists = _hists
+
+                    # call the plot function
+                    fig, _ = self.call_plot_func(
+                        self.plot_function,
+                        hists=hists,
+                        config_inst=self.config_inst,
+                        # category_inst=category_inst.copy_shallow(),
+                        category_inst=category_inst.copy_shallow(),
+                        # variable_insts=[var_inst.copy_shallow() for var_inst in variable_insts],
+                        variable_insts=[var],
+                        **self.get_plot_parameters(),
+                    )
+
+                    # save the plot
+                    for outp in self.output()["plots"]:
+                        print("outp", outp)
+                        outp.dump(fig, formatter="mpl")
+                    
+                    for outp in self.custom_output(category_inst.name, var.name)["plots"]:
+                        print("outp", outp)
+                        outp.dump(fig, formatter="mpl")
+                    
+
+        # from IPython import embed; embed()
+        if nb_cat == 2:
+            print("Save ratio plots")
+
+            for var_inst in variable_insts:
+                if var_inst.name == "tau_1_pt":
+                    variable_insts_iso = var_inst.copy_shallow()
+                if var_inst.name == "tauantiiso_1_pt":
+                    variable_insts_antiiso = var_inst.copy_shallow()
 
             # call the plot function
-            fig, _ = self.call_plot_func(
-                self.plot_function,
-                hists=hists,
-                config_inst=self.config_inst,
-                category_inst=category_inst.copy_shallow(),
-                variable_insts=[var_inst.copy_shallow() for var_inst in variable_insts],
+            fig, _ = plot_ratio_FF(
+                config_inst = self.config_inst,
+                hists_iso=hists_iso,
+                hists_antiiso=hists_antiiso,
+                category_inst_iso=category_inst.copy_shallow(),
+                variable_insts_iso=variable_insts_iso,
+                variable_insts_antiiso=variable_insts_antiiso,
                 **self.get_plot_parameters(),
             )
 
-            # save the plot
-            for outp in self.output()["plots"]:
+            for outp in self.ratio_output("FFDRIso_tautau", "FFDRantiIso_tautau", variable_insts_iso.name, variable_insts_antiiso.name)["plots"]:
+                print("outp", outp)
                 outp.dump(fig, formatter="mpl")
+
+
+            # hists_iso_1d = hists_iso.project("tau_1_pt")
+            # hists_antiiso_1d = hists_antiiso.project("tauantiiso_1_pt")
+
+            # print("hists_iso_1d", hists_iso_1d)
+            # print("hists_antiiso_1d", hists_antiiso_1d)
+            
+            # # fig = plt.figure(figsize=(10, 8))
+
+            # fig, axs = plt.subplots(2, 1, gridspec_kw=dict(height_ratios=[3, 1], hspace=0), sharex=True)
+            # main_ax_artists, sublot_ax_arists = hists_iso_1d.plot_ratio(
+            #     hists_antiiso_1d,
+            #     rp_ylabel=None,
+            #     rp_num_label="hists_iso",
+            #     rp_denom_label="hists_antiiso",
+            # )
+
+            plt.savefig("ratio.png")
+
+
 
 
 class PlotVariablesBaseSingleShift(
@@ -201,6 +278,7 @@ class PlotVariablesBaseSingleShift(
     reqs = Requirements(
         PlotVariablesBase.reqs,
         MergeHistograms=MergeHistograms,
+        DataDrivenEstimation=DataDrivenEstimation,
     )
 
     def create_branch_map(self):
@@ -220,7 +298,8 @@ class PlotVariablesBaseSingleShift(
         return reqs
 
     def requires(self):
-        return {
+        
+        reqs = {
             d: self.reqs.MergeHistograms.req(
                 self,
                 dataset=d,
@@ -228,8 +307,12 @@ class PlotVariablesBaseSingleShift(
                 _exclude={"branches"},
                 _prefer_cli={"variables"},
             )
-            for d in self.datasets
-        }
+            for d in self.datasets}
+        
+        reqs["qcd_hists"] = self.reqs.DataDrivenEstimation.req(self, branch=-1, categories={'FFDRantiIso_tautau'})
+        return reqs
+   
+               
 
     def plot_parts(self) -> law.util.InsertableDict:
         parts = super().plot_parts()
@@ -254,6 +337,22 @@ class PlotVariablesBaseSingleShift(
         if "shift" in parts:
             parts.insert_before("datasets", "shift", parts.pop("shift"))
         return parts
+
+    # plot different varaibles and categories
+    def custom_output(self, cat, var):
+        b = self.branch_data
+        return {"plots": [
+            self.target(name)
+            for name in self.get_plot_names(f"plot__proc_{self.processes_repr}__cat_{cat}__var_{var}")
+        ]}
+
+    # plot different varaibles and categories
+    def ratio_output(self, cat_iso, cat_antiiso, var_iso, var_antiiso):
+        b = self.branch_data
+        return {"plots": [
+            self.target(name)
+            for name in self.get_plot_names(f"plot_ratio__proc_{self.processes_repr}__cat_{cat_iso}_vs_cat{cat_antiiso}__var_{var_iso}_vs_var_{var_antiiso}")
+        ]}
 
     def get_plot_shifts(self):
         return [self.global_shift_inst]
@@ -303,6 +402,8 @@ class PlotVariablesBaseMultiShifts(
         description="sets the title of the legend; when empty and only one process is present in "
         "the plot, the process_inst label is used; empty default",
     )
+    """
+    """
 
     exclude_index = True
 

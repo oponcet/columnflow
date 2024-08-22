@@ -9,6 +9,7 @@ from __future__ import annotations
 from columnflow.types import Sequence
 from columnflow.util import maybe_import, try_float
 from columnflow.plotting.plot_util import get_position, get_cms_label
+# from columnflow.plotting.plot_root import convert_hist_to_root
 
 hist = maybe_import("hist")
 np = maybe_import("numpy")
@@ -98,6 +99,24 @@ def draw_hist(
     }
     defaults.update(kwargs)
     h.plot1d(**defaults)
+
+def draw_ratio(
+    ax: plt.Axes,
+    h_iso: hist.Hist,
+    h_antiiso: hist.Hist,
+    norm: float | Sequence | np.ndarray = 1.0,
+    **kwargs,
+) -> None:
+    # h_iso = h_iso / norm
+    # h_antiiso = h_antiiso / norm
+    # defaults = {
+    #     "ax": ax,
+    #     "stack": False,
+    #     "histtype": "step",
+    # }
+    # defaults.update(kwargs)
+    # h_iso.plot_ratio(h_antiiso,**defaults)
+    h_iso.plot_ratio(h_antiiso)
 
 
 def draw_profile(
@@ -192,10 +211,12 @@ def plot_all(
     with a logarithmic scale.
     :return: tuple of plot figure and axes
     """
+    print(" >>>>>>>> plot_all")
+
     # available plot methods mapped to their names
     plot_methods = {
         func.__name__: func
-        for func in [draw_error_bands, draw_stack, draw_hist, draw_profile, draw_errorbars]
+        for func in [draw_error_bands, draw_stack, draw_hist, draw_errorbars,draw_ratio,draw_profile]
     }
 
     plt.style.use(mplhep.style.CMS)
@@ -212,17 +233,27 @@ def plot_all(
         if "method" not in cfg:
             raise ValueError(f"no method given in plot_cfg entry {key}")
         method = cfg["method"]
+        print(f"method : {method}")
 
-        if "hist" not in cfg:
-            raise ValueError(f"no histogram(s) given in plot_cfg entry {key}")
-        hist = cfg["hist"]
-        kwargs = cfg.get("kwargs", {})
-        plot_methods[method](ax, hist, **kwargs)
+        if method == "draw_ratio":
+            print("plotting ratio")
+            h_iso = cfg["h_iso"]
+            h_antiiso = cfg["h_antiiso"]
+            plot_methods[method](ax, h_iso, h_antiiso, **kwargs)
+            
+        
+        else:
+            if "hist" not in cfg:
+                raise ValueError(f"no histogram(s) given in plot_cfg entry {key}")
+            hist = cfg["hist"]
+            # print(f"hist : {hist}")
+            kwargs = cfg.get("kwargs", {})
+            plot_methods[method](ax, hist, **kwargs)
 
-        if not skip_ratio and "ratio_kwargs" in cfg:
-            # take ratio_method if the ratio plot requires a different plotting method
-            method = cfg.get("ratio_method", method)
-            plot_methods[method](rax, hist, **cfg["ratio_kwargs"])
+            if not skip_ratio and "ratio_kwargs" in cfg:
+                # take ratio_method if the ratio plot requires a different plotting method
+                method = cfg.get("ratio_method", method)
+                plot_methods[method](rax, hist, **cfg["ratio_kwargs"])
 
     # axis styling
     ax_kwargs = {
@@ -325,5 +356,8 @@ def plot_all(
         mplhep.cms.label(**cms_label_kwargs)
 
     plt.tight_layout()
+
+
+
 
     return fig, axs

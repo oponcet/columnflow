@@ -185,7 +185,7 @@ def plot_shifted_variable(
             label += " ({0:+.2f}%)".format(diff * 100)
 
         plot_config[shift_inst.name] = plot_cfg = {
-            "method": "draw_hist",
+            "method": "draw_ratio",
             "hist": h,
             "kwargs": {
                 "norm": sum(h.values()) if shape_norm else 1,

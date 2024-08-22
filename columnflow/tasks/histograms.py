@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import luigi
 import law
+# import ROOT
+# ROOT.gROOT.SetBatch(True)
+
 
 from columnflow.tasks.framework.base import Requirements, AnalysisTask, DatasetTask, wrapper_factory
 from columnflow.tasks.framework.mixins import (
@@ -192,11 +195,25 @@ class CreateHistograms(
                     missing_strategy=self.missing_column_alias_strategy,
                 )
 
-                # build the full event weight
-                if hasattr(self.weight_producer_inst, "skip_func") and not self.weight_producer_inst.skip_func():
-                    events, weight = self.weight_producer_inst(events)
-                else:
-                    weight = ak.Array(np.ones(len(events), dtype=np.float32))
+                # broadcast arrays so that each event can be filled for all its categories
+                fill_kwargs = {
+                    "category": category_ids,
+                    "process": events.process_id,
+                    "shift": np.ones(len(events), dtype=np.int32) * self.global_shift_inst.id,
+                    "weight": weight,
+                }
+                # from IPython import embed; embed()
+                for variable_inst in variable_insts:
+                    # prepare the expression
+                    expr = variable_inst.expression
+                    if isinstance(expr, str):
+                        route = Route(expr)
+                        def expr(events, *args, **kwargs):
+                            if len(events) == 0 and not has_ak_column(events, route):
+                                return empty_f32
+                            return route.apply(events, null_value=variable_inst.null_value)
+                    # apply it
+                    fill_kwargs[variable_inst.name] = expr(events)
 
                 # define and fill histograms, taking into account multiple axes
                 for var_key, var_names in self.variable_tuples.items():
@@ -252,6 +269,49 @@ class CreateHistograms(
                         fill_data,
                         last_edge_inclusive=self.last_edge_inclusive,
                     )
+
+                # ROOT
+               
+
+                # for category_axis in histograms[var_key].axes: #['category', 'process', 'shift']
+
+                hist_var = histograms[var_key]
+
+
+                cat_ids = hist_var.axes[0]
+                # print(f"cat_ids : {cat_ids}")
+
+                # print (f"hist_var : {hist_var}")
+                # for category_id, process_id, shift_id in zip(cat_ids, events.process_id, np.ones(len(events), dtype=np.int32) * self.global_shift_inst.id):
+                #     # Extract histogram for the current category
+                #     # print(f"category_id : {category_id}")
+                #     # print(f"process_id : {process_id}")
+                #     # print(f"shift_id : {shift_id}")
+                #     hist_category = hist_var[hist.loc(category_id), hist.loc(process_id), hist.loc(shift_id), :]
+                #     h = hist_category.to_numpy()
+                #     # print(f"h : {h}")
+                #     hist_values = h[0]
+                #     bin_edges = h[1]
+                #     # print(f"hist_values : {hist_values}")
+                    # # print(f"bin_edges : {bin_edges}")
+                    # numpy_hist = np.histogram(bin_edges[:-1], bins=bin_edges, weights=hist_values)
+                    # # print(f"numpy_hist : {numpy_hist}")
+                    # num_bins = len(hist_values)
+                    # bin_edges = np.array(bin_edges)
+                    # hist_values = np.array(hist_values)
+                    # root_hist = ROOT.TH1F("hist", "hist", num_bins, bin_edges)
+                    # for i in range(num_bins):
+                    #     root_hist.SetBinContent(i + 1, hist_values[i])
+                    # c1 = ROOT.TCanvas("c1", "Canvas", 800, 600)
+                    # outputfile =  self.target(f"histogram_{var_key}_cat{category_id}_{process_id}_{shift_id}.root")
+
+                    # print(f"outputfile : {outputfile.path}")
+                    # root_hist.SaveAs(outputfile.path)
+
+                print(f"histograms : {histograms}")
+                print(f"histograms[var_key] : {histograms[var_key]}")
+                print(f"arrays : {arrays}")
+                print(f"arrays.fields : {arrays.fields}")
 
         # merge output files
         self.output()["hists"].dump(histograms, formatter="pickle")
